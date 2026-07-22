@@ -208,6 +208,20 @@ final class AppStore: ObservableObject {
         }
     }
 
+    enum BackgroundImageSource: String, CaseIterable, Identifiable {
+        case desktopWallpaper
+        case customImage
+
+        var id: String { rawValue }
+
+        var localizationKey: LocalizationKey {
+            switch self {
+            case .desktopWallpaper: return .backgroundImageSourceDesktopWallpaper
+            case .customImage: return .backgroundImageSourceCustomImage
+            }
+        }
+    }
+
     enum DockDragSide: String, CaseIterable, Codable, Identifiable {
         case disabled
         case bottom
@@ -397,6 +411,9 @@ final class AppStore: ObservableObject {
     private static let cliPathSnippetHeader = "# >>> LaunchNext CLI >>>"
     private static let cliPathSnippetFooter = "# <<< LaunchNext CLI <<<"
     static let backgroundStyleKey = "launchpadBackgroundStyle"
+    static let backgroundImageEnabledKey = "launchpadBackgroundImageEnabled"
+    static let backgroundImageSourceKey = "launchpadBackgroundImageSource"
+    static let customBackgroundImagePathKey = "launchpadCustomBackgroundImagePath"
     static let backgroundMaskEnabledKey = "launchpadBackgroundMaskEnabled"
     static let backgroundMaskLightKey = "launchpadBackgroundMaskLight"
     static let backgroundMaskDarkKey = "launchpadBackgroundMaskDark"
@@ -667,6 +684,37 @@ final class AppStore: ObservableObject {
         }
     }
 
+    @Published var backgroundImageEnabled: Bool = {
+        UserDefaults.standard.object(forKey: AppStore.backgroundImageEnabledKey) as? Bool ?? false
+    }() {
+        didSet {
+            guard backgroundImageEnabled != oldValue else { return }
+            UserDefaults.standard.set(backgroundImageEnabled, forKey: Self.backgroundImageEnabledKey)
+        }
+    }
+
+    @Published var backgroundImageSource: BackgroundImageSource = {
+        guard let raw = UserDefaults.standard.string(forKey: AppStore.backgroundImageSourceKey),
+              let source = BackgroundImageSource(rawValue: raw) else {
+            return .desktopWallpaper
+        }
+        return source
+    }() {
+        didSet {
+            guard backgroundImageSource != oldValue else { return }
+            UserDefaults.standard.set(backgroundImageSource.rawValue, forKey: Self.backgroundImageSourceKey)
+        }
+    }
+
+    @Published var customBackgroundImagePath: String = {
+        UserDefaults.standard.string(forKey: AppStore.customBackgroundImagePathKey) ?? ""
+    }() {
+        didSet {
+            guard customBackgroundImagePath != oldValue else { return }
+            UserDefaults.standard.set(customBackgroundImagePath, forKey: Self.customBackgroundImagePathKey)
+        }
+    }
+
     // Development-only override to capture flat screenshots quickly.
     @Published var developmentBackgroundOverride: DevelopmentBackgroundOverride = .none
 
@@ -719,6 +767,9 @@ final class AppStore: ObservableObject {
         defaults.set(SidebarIconPreset.large.rawValue, forKey: Self.sidebarIconPresetKey)
         defaults.set(AppearancePreference.system.rawValue, forKey: "appearancePreference")
         defaults.set(BackgroundStyle.glass.rawValue, forKey: Self.backgroundStyleKey)
+        defaults.set(false, forKey: Self.backgroundImageEnabledKey)
+        defaults.set(BackgroundImageSource.desktopWallpaper.rawValue, forKey: Self.backgroundImageSourceKey)
+        defaults.set("", forKey: Self.customBackgroundImagePathKey)
         defaults.set(false, forKey: Self.backgroundMaskEnabledKey)
         Self.persistBackgroundMaskColor(Self.defaultBackgroundMaskColor, forKey: Self.backgroundMaskLightKey)
         Self.persistBackgroundMaskColor(Self.defaultBackgroundMaskColor, forKey: Self.backgroundMaskDarkKey)
@@ -782,6 +833,14 @@ final class AppStore: ObservableObject {
         }
 
         launchpadBackgroundStyle = Self.loadBackgroundStyle()
+        backgroundImageEnabled = defaults.object(forKey: Self.backgroundImageEnabledKey) as? Bool ?? false
+        if let raw = defaults.string(forKey: Self.backgroundImageSourceKey),
+           let source = BackgroundImageSource(rawValue: raw) {
+            backgroundImageSource = source
+        } else {
+            backgroundImageSource = .desktopWallpaper
+        }
+        customBackgroundImagePath = defaults.string(forKey: Self.customBackgroundImagePathKey) ?? ""
         backgroundMaskEnabled = Self.loadBackgroundMaskEnabled()
         backgroundMaskLightColor = Self.loadBackgroundMaskColor(forKey: Self.backgroundMaskLightKey)
         backgroundMaskDarkColor = Self.loadBackgroundMaskColor(forKey: Self.backgroundMaskDarkKey)
@@ -4516,6 +4575,9 @@ final class AppStore: ObservableObject {
             Self.sidebarIconPresetKey,
             "appearancePreference",
             Self.backgroundStyleKey,
+            Self.backgroundImageEnabledKey,
+            Self.backgroundImageSourceKey,
+            Self.customBackgroundImagePathKey,
             Self.backgroundMaskEnabledKey,
             Self.backgroundMaskLightKey,
             Self.backgroundMaskDarkKey,

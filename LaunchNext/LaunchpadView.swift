@@ -109,6 +109,7 @@ private extension View {
 
 struct LaunchpadView: View {
     @ObservedObject var appStore: AppStore
+    @StateObject private var backgroundImageController = BackgroundImageController()
     @Environment(\.colorScheme) private var colorScheme
     @State private var keyMonitor: Any?
     @State private var windowObserver: NSObjectProtocol?
@@ -309,6 +310,25 @@ struct LaunchpadView: View {
          .onReceive(ControllerInputManager.shared.commands) { command in
              handleControllerCommand(command)
          }
+         .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.activeSpaceDidChangeNotification)) { _ in
+             guard isWindowVisible else { return }
+             refreshBackgroundImage(forceDesktopRefresh: true)
+         }
+         .onReceive(NotificationCenter.default.publisher(for: NSWindow.didChangeScreenNotification)) { notification in
+             guard isWindowVisible,
+                   let changedWindow = notification.object as? NSWindow,
+                   changedWindow == NSApp.keyWindow else { return }
+             refreshBackgroundImage(forceDesktopRefresh: true)
+         }
+         .onChange(of: appStore.backgroundImageEnabled) { _, _ in
+             refreshBackgroundImage()
+         }
+         .onChange(of: appStore.backgroundImageSource) { _, _ in
+             refreshBackgroundImage()
+         }
+         .onChange(of: appStore.customBackgroundImagePath) { _, _ in
+             refreshBackgroundImage()
+         }
 
            .onAppear {
               if !appStore.shouldShowOnboarding {
@@ -319,6 +339,7 @@ struct LaunchpadView: View {
               setupInitialSelection()
               setupWindowShownObserver()
               setupWindowHiddenObserver()
+              refreshBackgroundImage()
               isWindowVisible = true
               // 监听全局鼠标抬起，确保拖拽状态被正确清理（窗口外释放时）
                if let existing = globalMouseUpMonitor { NSEvent.removeMonitor(existing) }
@@ -358,6 +379,7 @@ struct LaunchpadView: View {
             windowObserver = nil
             windowHiddenObserver = nil
             stopFPSMonitoring()
+            backgroundImageController.clear()
          }
         .onChange(of: appStore.shouldShowOnboarding) { wasVisible, visible in
             if wasVisible && !visible {
@@ -425,6 +447,18 @@ struct LaunchpadView: View {
     }
 
     private var launchpadBaseView: some View {
+        ZStack {
+            LaunchpadBackgroundImageView(image: displayedBackgroundImage)
+
+            launchpadBackdropLayer
+
+            launchpadStyledContent
+        }
+        .ignoresSafeArea()
+        .overlay(launchpadInteractionOverlay)
+    }
+
+    private var launchpadStyledContent: some View {
         GeometryReader { geo in
             launchpadMainContent(in: geo)
         }
@@ -433,18 +467,26 @@ struct LaunchpadView: View {
                                   cornerRadius: appStore.isFullscreenMode ? 0 : 30,
                                   forcedColor: appStore.developmentBackgroundOverride.color,
                                   maskColor: appStore.backgroundMaskColor(for: colorScheme))
-        .background(
-            ZStack {
-                Color.black.opacity(backdropOpacity)
-                if onboardingLightFilterOpacity > 0 {
-                    Color.white.opacity(onboardingLightFilterOpacity)
-                }
+    }
+
+    private var launchpadBackdropLayer: some View {
+        ZStack {
+            Color.black.opacity(backdropOpacity)
+            if onboardingLightFilterOpacity > 0 {
+                Color.white.opacity(onboardingLightFilterOpacity)
             }
-            .animation(.easeInOut(duration: 0.22), value: appStore.shouldShowOnboarding)
-            .animation(.easeInOut(duration: 0.22), value: colorScheme)
-        )
-        .ignoresSafeArea()
-        .overlay(launchpadInteractionOverlay)
+        }
+        .animation(.easeInOut(duration: 0.22), value: appStore.shouldShowOnboarding)
+        .animation(.easeInOut(duration: 0.22), value: colorScheme)
+        .allowsHitTesting(false)
+    }
+
+    private var displayedBackgroundImage: CGImage? {
+        guard appStore.backgroundImageEnabled,
+              appStore.developmentBackgroundOverride.color == nil else {
+            return nil
+        }
+        return backgroundImageController.content?.image
     }
 
     private func launchpadMainContent(in geo: GeometryProxy) -> some View {
@@ -2001,12 +2043,23 @@ extension LaunchpadView {
 
 // MARK: - Keyboard Navigation
 extension LaunchpadView {
+    private func refreshBackgroundImage(forceDesktopRefresh: Bool = false) {
+        backgroundImageController.refresh(
+            for: NSApp.keyWindow?.screen ?? NSScreen.main,
+            enabled: appStore.backgroundImageEnabled,
+            source: appStore.backgroundImageSource,
+            customImagePath: appStore.customBackgroundImagePath,
+            forceDesktopRefresh: forceDesktopRefresh
+        )
+    }
+
     private func setupWindowShownObserver() {
         if let observer = windowObserver {
             NotificationCenter.default.removeObserver(observer)
             windowObserver = nil
         }
         windowObserver = NotificationCenter.default.addObserver(forName: .launchpadWindowShown, object: nil, queue: .main) { _ in
+            refreshBackgroundImage()
             isWindowVisible = true
             isKeyboardNavigationActive = false
             selectedIndex = 0

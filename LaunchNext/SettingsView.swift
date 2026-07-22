@@ -82,11 +82,19 @@ struct SettingsView: View {
     @State private var showCLIFullPathCommand = false
     @State private var showHideMenuBarInfoPopover = false
     @State private var showFolderQuickLaunchInfoPopover = false
+    @State private var backgroundImageSourceSelection: AppStore.BackgroundImageSource
+    @State private var hoveredBackgroundImageSource: AppStore.BackgroundImageSource?
     @State private var copiedCLICommand: String? = nil
     @State private var cliCommandActionMessage: String? = nil
     @State private var layoutModePreviewScope: LayoutModePreviewScope = .fullscreen
     @State private var lastUpdatesTabRefreshAt: Date? = nil
     private let dockDragSelectableSides: [AppStore.DockDragSide] = [.bottom, .left, .right]
+
+    init(appStore: AppStore) {
+        self.appStore = appStore
+        _backgroundImageSourceSelection = State(initialValue: appStore.backgroundImageSource)
+        _hoveredBackgroundImageSource = State(initialValue: nil)
+    }
 
     // Sidebar sizing presets
     private var sidebarIconFrame: CGFloat {
@@ -4714,6 +4722,10 @@ private enum SettingsSection: String, CaseIterable, Identifiable {
         }
         .onAppear {
             syncLayoutModePreviewScopeToRuntime()
+            syncBackgroundImageSourceSelection()
+        }
+        .onChange(of: appStore.backgroundImageSource) { _, _ in
+            syncBackgroundImageSourceSelection()
         }
     }
 
@@ -4873,6 +4885,45 @@ private enum SettingsSection: String, CaseIterable, Identifiable {
             .opacity(appStore.useCAGridRenderer ? 1 : 0.5)
 
             HStack {
+                Text(appStore.localized(.backgroundImageTitle))
+                Spacer()
+                Toggle("", isOn: $appStore.backgroundImageEnabled)
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+            }
+
+            if appStore.backgroundImageEnabled {
+                HStack {
+                    Text(appStore.localized(.backgroundImageSourceTitle))
+                    Spacer()
+                    HStack(spacing: 8) {
+                        ForEach(AppStore.BackgroundImageSource.allCases) { source in
+                            backgroundImageSourceButton(source)
+                        }
+                    }
+                    .onChange(of: backgroundImageSourceSelection) { _, source in
+                        handleBackgroundImageSourceSelection(source)
+                    }
+                }
+
+                if appStore.backgroundImageSource == .customImage {
+                    HStack(spacing: 8) {
+                        Image(systemName: customBackgroundImageIsReadable ? "photo" : "exclamationmark.triangle")
+                            .foregroundStyle(customBackgroundImageIsReadable ? Color.secondary : Color.orange)
+                        Text(customBackgroundImageDisplayName)
+                            .foregroundStyle(customBackgroundImageIsReadable ? Color.secondary : Color.orange)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        Spacer()
+                        Button(appStore.localized(customBackgroundImagePathIsEmpty ? .chooseBackgroundImage : .changeBackgroundImage)) {
+                            chooseCustomBackgroundImage()
+                        }
+                        .buttonStyle(.bordered)
+                    }
+                }
+            }
+
+            HStack {
                 Text(appStore.localized(.windowOpenAnimationTitle))
                 Spacer()
                 Toggle("", isOn: $appStore.enableWindowOpenAnimation)
@@ -4937,6 +4988,116 @@ private enum SettingsSection: String, CaseIterable, Identifiable {
             RoundedRectangle(cornerRadius: 18, style: .continuous)
                 .strokeBorder(Color(nsColor: .separatorColor).opacity(0.28), lineWidth: 0.7)
         )
+    }
+
+    private func syncBackgroundImageSourceSelection() {
+        let source = appStore.backgroundImageSource
+        guard backgroundImageSourceSelection != source else { return }
+        backgroundImageSourceSelection = source
+    }
+
+    private func backgroundImageSourceButton(_ source: AppStore.BackgroundImageSource) -> some View {
+        let isSelected = backgroundImageSourceSelection == source
+        let isHovered = hoveredBackgroundImageSource == source
+        let symbolName = source == .desktopWallpaper ? "desktopcomputer" : "photo"
+        let shape = RoundedRectangle(cornerRadius: 9, style: .continuous)
+
+        return Button {
+            guard backgroundImageSourceSelection != source else { return }
+            backgroundImageSourceSelection = source
+        } label: {
+            HStack(spacing: 7) {
+                Image(systemName: symbolName)
+                    .font(.system(size: 13, weight: .semibold))
+                    .frame(width: 16)
+                Text(appStore.localized(source.localizationKey))
+                    .font(.subheadline.weight(.medium))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.72)
+            }
+            .foregroundStyle(isSelected ? Color.accentColor : Color.primary)
+            .frame(width: 136, height: 32)
+            .contentShape(shape)
+        }
+        .buttonStyle(.plain)
+        .background {
+            shape.fill(
+                isSelected
+                    ? Color.accentColor.opacity(colorScheme == .dark ? 0.22 : 0.13)
+                    : Color.primary.opacity(isHovered ? 0.075 : 0.035)
+            )
+        }
+        .overlay {
+            shape.strokeBorder(
+                isSelected
+                    ? Color.accentColor.opacity(0.48)
+                    : Color.primary.opacity(isHovered ? 0.13 : 0.07),
+                lineWidth: 0.8
+            )
+        }
+        .onHover { hovering in
+            if hovering {
+                hoveredBackgroundImageSource = source
+            } else if hoveredBackgroundImageSource == source {
+                hoveredBackgroundImageSource = nil
+            }
+        }
+        .animation(.easeOut(duration: 0.12), value: isSelected)
+        .animation(.easeOut(duration: 0.12), value: isHovered)
+        .accessibilityLabel(appStore.localized(source.localizationKey))
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
+    }
+
+    private func handleBackgroundImageSourceSelection(_ source: AppStore.BackgroundImageSource) {
+        guard source != appStore.backgroundImageSource else { return }
+
+        DispatchQueue.main.async {
+            guard backgroundImageSourceSelection == source else { return }
+
+            if source == .customImage && customBackgroundImagePathIsEmpty {
+                if !chooseCustomBackgroundImage() {
+                    syncBackgroundImageSourceSelection()
+                }
+            } else {
+                appStore.backgroundImageSource = source
+            }
+        }
+    }
+
+    private var customBackgroundImagePathIsEmpty: Bool {
+        appStore.customBackgroundImagePath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private var customBackgroundImageIsReadable: Bool {
+        guard !customBackgroundImagePathIsEmpty else { return false }
+        return FileManager.default.isReadableFile(atPath: appStore.customBackgroundImagePath)
+    }
+
+    private var customBackgroundImageDisplayName: String {
+        guard !customBackgroundImagePathIsEmpty else {
+            return appStore.localized(.backgroundImageUnavailable)
+        }
+        guard customBackgroundImageIsReadable else {
+            return appStore.localized(.backgroundImageUnavailable)
+        }
+        return URL(fileURLWithPath: appStore.customBackgroundImagePath).lastPathComponent
+    }
+
+    @discardableResult
+    private func chooseCustomBackgroundImage() -> Bool {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.resolvesAliases = true
+        panel.allowedContentTypes = [.image]
+        panel.prompt = appStore.localized(.chooseBackgroundImage)
+
+        guard panel.runModal() == .OK, let url = panel.url else { return false }
+        appStore.customBackgroundImagePath = url.standardizedFileURL.path
+        appStore.backgroundImageSource = .customImage
+        backgroundImageSourceSelection = .customImage
+        return true
     }
 
     private func backgroundStyleOption(_ style: AppStore.BackgroundStyle, systemImage: String) -> some View {
@@ -5588,6 +5749,9 @@ private enum SettingsSection: String, CaseIterable, Identifiable {
                 if appearanceCheckbox.state == .on {
                     keys.insert(AppStore.sidebarIconPresetKey)
                     keys.insert(AppStore.backgroundStyleKey)
+                    keys.insert(AppStore.backgroundImageEnabledKey)
+                    keys.insert(AppStore.backgroundImageSourceKey)
+                    keys.insert(AppStore.customBackgroundImagePathKey)
                     keys.insert(AppStore.backgroundMaskEnabledKey)
                     keys.insert(AppStore.backgroundMaskLightKey)
                     keys.insert(AppStore.backgroundMaskDarkKey)
