@@ -68,6 +68,10 @@ extension CAGridView {
     }
 
     override func scrollWheel(with event: NSEvent) {
+        guard !isContextMenuTracking else {
+            super.scrollWheel(with: event)
+            return
+        }
         // 当本地 monitor 存在时，避免双重处理
         if scrollEventMonitor != nil {
             return

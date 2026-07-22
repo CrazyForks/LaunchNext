@@ -401,6 +401,7 @@ final class AppStore: ObservableObject {
     static let backgroundMaskLightKey = "launchpadBackgroundMaskLight"
     static let backgroundMaskDarkKey = "launchpadBackgroundMaskDark"
     static let folderPreviewHighResKey = "folderPreviewHighRes"
+    static let folderQuickLaunchEnabledKey = "folderQuickLaunchEnabled"
     static let sidebarIconPresetKey = "sidebarIconPreset"
     static let uninstallToolAppPathKey = "uninstallToolAppPath"
     static let pageIndicatorPerDisplayEnabledKey = "pageIndicatorPerDisplayEnabled"
@@ -724,6 +725,7 @@ final class AppStore: ObservableObject {
         defaults.set(true, forKey: "isFullscreenMode")
         defaults.set(true, forKey: "showLabels")
         defaults.set(true, forKey: Self.folderPreviewHighResKey)
+        defaults.set(false, forKey: Self.folderQuickLaunchEnabledKey)
         defaults.set(FolderLayoutMode.paged.rawValue, forKey: Self.folderLayoutModeKey)
         defaults.set(false, forKey: "hideDock")
         defaults.set(false, forKey: Self.hideMenuBarKey)
@@ -787,6 +789,7 @@ final class AppStore: ObservableObject {
         isFullscreenMode = defaults.object(forKey: "isFullscreenMode") as? Bool ?? true
         showLabels = defaults.object(forKey: "showLabels") as? Bool ?? true
         enableHighResFolderPreviews = defaults.object(forKey: Self.folderPreviewHighResKey) as? Bool ?? true
+        folderQuickLaunchEnabled = defaults.object(forKey: Self.folderQuickLaunchEnabledKey) as? Bool ?? false
         folderLayoutMode = Self.loadFolderLayoutMode(from: defaults, isExistingInstall: nil)
         hideDock = defaults.object(forKey: "hideDock") as? Bool ?? false
         hideMenuBar = defaults.object(forKey: Self.hideMenuBarKey) as? Bool ?? false
@@ -1283,6 +1286,15 @@ final class AppStore: ObservableObject {
             clearIconCachesForLayoutChange()
             triggerFolderUpdate()
             triggerGridRefresh()
+        }
+    }
+
+    @Published var folderQuickLaunchEnabled: Bool = {
+        UserDefaults.standard.object(forKey: AppStore.folderQuickLaunchEnabledKey) as? Bool ?? false
+    }() {
+        didSet {
+            guard folderQuickLaunchEnabled != oldValue else { return }
+            UserDefaults.standard.set(folderQuickLaunchEnabled, forKey: AppStore.folderQuickLaunchEnabledKey)
         }
     }
 
@@ -3664,7 +3676,13 @@ final class AppStore: ObservableObject {
                         return self.placeholderAppInfo(forMissingPath: path)
                     }
                     
-                    let folder = FolderInfo(id: fid, name: row.folderName ?? "Untitled", apps: folderApps, createdAt: row.createdAt)
+                    let folder = folderWithValidQuickLaunchPins(FolderInfo(
+                        id: fid,
+                        name: row.folderName ?? "Untitled",
+                        apps: folderApps,
+                        pinnedAppPaths: row.pinnedAppPaths,
+                        createdAt: row.createdAt
+                    ))
                     folderMap[fid] = folder
                     foldersInOrder.append(folder)
                 }
@@ -3701,6 +3719,104 @@ final class AppStore: ObservableObject {
     //     //     AIOverlayController.shared.toggle(with: self)
     //     // }
     // }
+
+    func orderedFolderQuickLaunchApps(in folder: FolderInfo) -> [AppInfo] {
+        let resolvedFolder = folders.first(where: { $0.id == folder.id }) ?? folder
+        let normalizedFolder = folderWithValidQuickLaunchPins(resolvedFolder)
+        let pinnedPaths = Set(normalizedFolder.pinnedAppPaths)
+        let pinnedApps = normalizedFolder.apps.filter {
+            pinnedPaths.contains(standardizedFilePath($0.url.path))
+        }
+        let unpinnedApps = normalizedFolder.apps.filter {
+            !pinnedPaths.contains(standardizedFilePath($0.url.path))
+        }
+        return pinnedApps + unpinnedApps
+    }
+
+    func isFolderQuickLaunchAppPinned(_ app: AppInfo, inFolderID folderID: String) -> Bool {
+        guard let folder = folders.first(where: { $0.id == folderID }) else { return false }
+        let path = standardizedFilePath(app.url.path)
+        return folder.pinnedAppPaths.contains(path)
+    }
+
+    @discardableResult
+    func setFolderQuickLaunchAppPinned(_ pinned: Bool, app: AppInfo, inFolderID folderID: String) -> Bool {
+        guard useCAGridRenderer,
+              folderQuickLaunchEnabled,
+              let folderIndex = folders.firstIndex(where: { $0.id == folderID }) else { return false }
+
+        var updatedFolder = folderWithValidQuickLaunchPins(folders[folderIndex])
+        let appPath = standardizedFilePath(app.url.path)
+        guard updatedFolder.apps.contains(where: { standardizedFilePath($0.url.path) == appPath }) else {
+            return false
+        }
+
+        var pinnedPaths = Set(updatedFolder.pinnedAppPaths)
+        let changed: Bool
+        if pinned {
+            changed = pinnedPaths.insert(appPath).inserted
+        } else {
+            changed = pinnedPaths.remove(appPath) != nil
+        }
+        guard changed else { return false }
+
+        updatedFolder.pinnedAppPaths = Array(pinnedPaths)
+        updatedFolder = folderWithValidQuickLaunchPins(updatedFolder)
+        folders[folderIndex] = updatedFolder
+
+        for index in items.indices {
+            if case .folder(let folder) = items[index], folder.id == folderID {
+                items[index] = .folder(updatedFolder)
+            }
+        }
+        if openFolder?.id == folderID {
+            openFolder = updatedFolder
+        }
+
+        triggerFolderUpdate()
+        triggerGridRefresh()
+        saveAllOrder()
+        return true
+    }
+
+    private func folderWithValidQuickLaunchPins(_ folder: FolderInfo) -> FolderInfo {
+        let requestedPaths = Set(folder.pinnedAppPaths.map(standardizedFilePath))
+        let validPaths = folder.apps.compactMap { app -> String? in
+            let path = standardizedFilePath(app.url.path)
+            return requestedPaths.contains(path) ? path : nil
+        }
+        guard validPaths != folder.pinnedAppPaths else { return folder }
+        var copy = folder
+        copy.pinnedAppPaths = validPaths
+        return copy
+    }
+
+    @discardableResult
+    private func reconcileFolderQuickLaunchPinsInCurrentLayout() -> Bool {
+        var normalizedByID: [String: FolderInfo] = [:]
+        normalizedByID.reserveCapacity(folders.count)
+        var didChange = false
+
+        for index in folders.indices {
+            let normalized = folderWithValidQuickLaunchPins(folders[index])
+            if normalized.pinnedAppPaths != folders[index].pinnedAppPaths {
+                folders[index] = normalized
+                didChange = true
+            }
+            normalizedByID[normalized.id] = normalized
+        }
+
+        guard didChange else { return false }
+        for index in items.indices {
+            if case .folder(let folder) = items[index], let normalized = normalizedByID[folder.id] {
+                items[index] = .folder(normalized)
+            }
+        }
+        if let openFolder, let normalized = normalizedByID[openFolder.id] {
+            self.openFolder = normalized
+        }
+        return true
+    }
 
     deinit {
         autoCheckTimer?.cancel()
@@ -4128,6 +4244,7 @@ final class AppStore: ObservableObject {
         // 创建新的FolderInfo实例，确保SwiftUI能够检测到变化
         var updatedFolder = folders[folderIndex]
         updatedFolder.apps.removeAll { $0 == app }
+        updatedFolder = folderWithValidQuickLaunchPins(updatedFolder)
         
         
         // 如果文件夹空了，删除文件夹
@@ -4231,6 +4348,7 @@ final class AppStore: ObservableObject {
         let movingApp = updatedFolder.apps.remove(at: sourceIndex)
         let clampedDestination = min(max(0, destinationIndex), updatedFolder.apps.count)
         updatedFolder.apps.insert(movingApp, at: clampedDestination)
+        updatedFolder = folderWithValidQuickLaunchPins(updatedFolder)
         folders[folderIndex] = updatedFolder
 
         for idx in items.indices {
@@ -4404,6 +4522,7 @@ final class AppStore: ObservableObject {
             "isFullscreenMode",
             "showLabels",
             Self.folderPreviewHighResKey,
+            Self.folderQuickLaunchEnabledKey,
             Self.folderLayoutModeKey,
             "hideDock",
             Self.hideMenuBarKey,
@@ -4737,7 +4856,13 @@ final class AppStore: ObservableObject {
                     }
                     return self.placeholderAppInfo(forMissingPath: path, preferredName: row.folderName)
                 }
-                let folder = FolderInfo(id: fid, name: row.folderName ?? "Untitled", apps: folderApps, createdAt: row.createdAt)
+                let folder = folderWithValidQuickLaunchPins(FolderInfo(
+                    id: fid,
+                    name: row.folderName ?? "Untitled",
+                    apps: folderApps,
+                    pinnedAppPaths: row.pinnedAppPaths,
+                    createdAt: row.createdAt
+                ))
                 folderMap[fid] = folder
                 foldersInOrder.append(folder)
             }
@@ -4901,6 +5026,7 @@ final class AppStore: ObservableObject {
             print("LaunchNext: ModelContext is nil, cannot save order")
             return
         }
+        reconcileFolderQuickLaunchPinsInCurrentLayout()
         guard !items.isEmpty else {
             print("LaunchNext: Items list is empty, skipping save")
             return
@@ -4932,7 +5058,8 @@ final class AppStore: ObservableObject {
                         kind: "folder",
                         folderId: authoritativeFolder.id,
                         folderName: authoritativeFolder.name,
-                        appPaths: authoritativeFolder.apps.map { $0.url.path }
+                        appPaths: authoritativeFolder.apps.map { $0.url.path },
+                        pinnedAppPaths: authoritativeFolder.pinnedAppPaths
                     )
                     modelContext.insert(row)
                 case .app(let app):
@@ -5062,10 +5189,17 @@ final class AppStore: ObservableObject {
     }
 
     func notifyFolderContentChanged(_ folder: FolderInfo) {
+        let normalizedFolder = folderWithValidQuickLaunchPins(folder)
+        if let folderIndex = folders.firstIndex(where: { $0.id == normalizedFolder.id }) {
+            folders[folderIndex] = normalizedFolder
+        }
         for idx in items.indices {
-            if case .folder(let f) = items[idx], f.id == folder.id {
-                items[idx] = .folder(folder)
+            if case .folder(let f) = items[idx], f.id == normalizedFolder.id {
+                items[idx] = .folder(normalizedFolder)
             }
+        }
+        if openFolder?.id == normalizedFolder.id {
+            openFolder = normalizedFolder
         }
         triggerFolderUpdate()
         triggerGridRefresh()
@@ -5276,6 +5410,7 @@ final class AppStore: ObservableObject {
     // MARK: - 导出应用排序功能
     /// 导出应用排序为JSON格式
     func exportAppOrderAsJSON() -> String? {
+        reconcileFolderQuickLaunchPinsInCurrentLayout()
         let exportData = buildExportData()
         
         do {
@@ -5308,6 +5443,7 @@ final class AppStore: ObservableObject {
             if case let .folder(folder) = item {
                 itemData["folderApps"] = folder.apps.map { $0.name }
                 itemData["folderAppPaths"] = folder.apps.map { $0.url.path }
+                itemData["folderPinnedAppPaths"] = folder.pinnedAppPaths
             }
             
             pages.append(itemData)
@@ -5600,17 +5736,17 @@ final class AppStore: ObservableObject {
     }
 
     private func sanitizedFolders(_ input: [FolderInfo]) -> [FolderInfo] {
-        guard !hiddenAppPaths.isEmpty else { return input }
         let hidden = hiddenAppPaths
         var result: [FolderInfo] = []
         result.reserveCapacity(input.count)
         var didChange = false
         for folder in input {
-            let filtered = filteredFolderRemovingHidden(from: folder, hidden: hidden)
-            if filtered.apps.count != folder.apps.count {
+            let filtered = hidden.isEmpty ? folder : filteredFolderRemovingHidden(from: folder, hidden: hidden)
+            let normalized = folderWithValidQuickLaunchPins(filtered)
+            if normalized.apps.count != folder.apps.count || normalized.pinnedAppPaths != folder.pinnedAppPaths {
                 didChange = true
             }
-            result.append(filtered)
+            result.append(normalized)
         }
         return didChange ? result : input
     }
@@ -5655,14 +5791,14 @@ final class AppStore: ObservableObject {
     }
 
     private func filteredFolderRemovingHidden(from folder: FolderInfo, hidden: Set<String>) -> FolderInfo {
-        guard !hidden.isEmpty else { return folder }
+        guard !hidden.isEmpty else { return folderWithValidQuickLaunchPins(folder) }
         let filteredApps = folder.apps.filter { !hidden.contains($0.url.path) }
         if filteredApps.count == folder.apps.count {
-            return folder
+            return folderWithValidQuickLaunchPins(folder)
         }
         var copy = folder
         copy.apps = filteredApps
-        return copy
+        return folderWithValidQuickLaunchPins(copy)
     }
 
     // MARK: - Custom Titles
@@ -6357,6 +6493,7 @@ final class AppStore: ObservableObject {
             case "文件夹":
                 if let folderApps = pageData["folderApps"] as? [String],
                    let folderAppPaths = pageData["folderAppPaths"] as? [String] {
+                    let pinnedAppPaths = pageData["folderPinnedAppPaths"] as? [String] ?? []
                     // 重建文件夹 - 优先使用应用路径来匹配，确保准确性
                     let folderAppsList = folderAppPaths.compactMap { appPath in
                         // 通过应用路径匹配，这是最准确的方式
@@ -6383,11 +6520,19 @@ final class AppStore: ObservableObject {
                         
                         if let existing = existingFolder {
                             // 使用现有文件夹，保持ID一致
-                            importedFolders.append(existing)
-                            newItems.append(.folder(existing))
+                            var folder = existing
+                            folder.apps = folderAppsList
+                            folder.pinnedAppPaths = pinnedAppPaths
+                            folder = folderWithValidQuickLaunchPins(folder)
+                            importedFolders.append(folder)
+                            newItems.append(.folder(folder))
                         } else {
                             // 创建新文件夹
-                            let folder = FolderInfo(name: name, apps: folderAppsList)
+                            let folder = folderWithValidQuickLaunchPins(FolderInfo(
+                                name: name,
+                                apps: folderAppsList,
+                                pinnedAppPaths: pinnedAppPaths
+                            ))
                             importedFolders.append(folder)
                             newItems.append(.folder(folder))
                         }
@@ -6413,8 +6558,11 @@ final class AppStore: ObservableObject {
                         
                         if let existing = existingFolder {
                             // 使用现有文件夹，保持ID一致
-                            importedFolders.append(existing)
-                            newItems.append(.folder(existing))
+                            var folder = existing
+                            folder.apps = folderAppsList
+                            folder.pinnedAppPaths = []
+                            importedFolders.append(folder)
+                            newItems.append(.folder(folder))
                         } else {
                             // 创建新文件夹
                             let folder = FolderInfo(name: name, apps: folderAppsList)

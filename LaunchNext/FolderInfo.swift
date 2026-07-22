@@ -6,12 +6,18 @@ struct FolderInfo: Identifiable, Equatable {
     let id: String
     var name: String
     var apps: [AppInfo]
+    var pinnedAppPaths: [String]
     let createdAt: Date
     
-    init(id: String = UUID().uuidString, name: String = "Untitled", apps: [AppInfo] = [], createdAt: Date = Date()) {
+    init(id: String = UUID().uuidString,
+         name: String = "Untitled",
+         apps: [AppInfo] = [],
+         pinnedAppPaths: [String] = [],
+         createdAt: Date = Date()) {
         self.id = id
         self.name = name
         self.apps = apps
+        self.pinnedAppPaths = pinnedAppPaths
         self.createdAt = createdAt
     }
     
@@ -261,6 +267,7 @@ final class PageEntryData {
     var folderId: String?
     var folderName: String?
     var appPaths: [String]
+    var pinnedAppPaths: [String] = []
     // removable source 记录该缺失应用来自哪个可移除目录，便于清理
     var removableSource: String?
     // 时间戳
@@ -275,6 +282,7 @@ final class PageEntryData {
          folderId: String? = nil,
          folderName: String? = nil,
          appPaths: [String] = [],
+         pinnedAppPaths: [String] = [],
          appDisplayName: String? = nil,
          removableSource: String? = nil,
          createdAt: Date = Date(),
@@ -287,6 +295,7 @@ final class PageEntryData {
         self.folderId = folderId
         self.folderName = folderName
         self.appPaths = appPaths
+        self.pinnedAppPaths = pinnedAppPaths
         self.appDisplayName = appDisplayName
         self.removableSource = removableSource
         self.createdAt = createdAt

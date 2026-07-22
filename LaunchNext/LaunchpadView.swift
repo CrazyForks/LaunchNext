@@ -1016,7 +1016,9 @@ struct LaunchpadView: View {
     private func launchApp(_ app: AppInfo) {
         AppDelegate.shared?.hideWindow()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-            NSWorkspace.shared.open(app.url)
+            if !NSWorkspace.shared.open(app.url) {
+                NSSound.beep()
+            }
         }
     }
     

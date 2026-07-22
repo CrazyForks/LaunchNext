@@ -107,6 +107,8 @@ extension CAGridView {
             super.rightMouseDown(with: event)
             return
         }
+        isContextMenuTracking = true
+        defer { isContextMenuTracking = false }
         NSMenu.popUpContextMenu(menu, with: event, for: self)
     }
 
@@ -189,6 +191,41 @@ extension CAGridView {
             contextMenuTargetApp = nil
             contextMenuTargetFolder = folder
             let menu = NSMenu(title: "")
+
+            if folderQuickLaunchEnabled, !folder.apps.isEmpty {
+                let quickLaunchApps = folderQuickLaunchAppsSorter?(folder) ?? folder.apps
+                let pinnedApps = quickLaunchApps.filter {
+                    isFolderQuickLaunchAppPinned?(folder, $0) ?? false
+                }
+                let unpinnedApps = quickLaunchApps.filter {
+                    !(isFolderQuickLaunchAppPinned?(folder, $0) ?? false)
+                }
+
+                func addQuickLaunchItem(for app: AppInfo, pinned: Bool) {
+                    let appItem = NSMenuItem(
+                        title: app.name,
+                        action: #selector(handleFolderQuickLaunchFromContextMenu(_:)),
+                        keyEquivalent: ""
+                    )
+                    appItem.representedObject = app
+                    if pinned {
+                        appItem.image = NSImage(
+                            systemSymbolName: "pin.fill",
+                            accessibilityDescription: app.name
+                        )
+                    }
+                    appItem.target = self
+                    menu.addItem(appItem)
+                }
+
+                pinnedApps.forEach { addQuickLaunchItem(for: $0, pinned: true) }
+                if !pinnedApps.isEmpty, !unpinnedApps.isEmpty {
+                    menu.addItem(NSMenuItem.separator())
+                }
+                unpinnedApps.forEach { addQuickLaunchItem(for: $0, pinned: false) }
+                menu.addItem(NSMenuItem.separator())
+            }
+
             let renameItem = NSMenuItem(
                 title: renameFolderMenuTitle,
                 action: #selector(handleRenameFolderFromContextMenu(_:)),
@@ -241,6 +278,13 @@ extension CAGridView {
         contextMenuTargetFolder = nil
     }
 
+    @objc private func handleFolderQuickLaunchFromContextMenu(_ sender: NSMenuItem) {
+        guard let app = sender.representedObject as? AppInfo else { return }
+        onFolderQuickLaunchApp?(app)
+        contextMenuTargetApp = nil
+        contextMenuTargetFolder = nil
+    }
+
     @objc private func handleRenameFolderFromContextMenu(_ sender: NSMenuItem) {
         guard let folder = contextMenuTargetFolder else { return }
         onRenameFolder?(folder)
@@ -282,6 +326,8 @@ extension CAFolderGridView {
             super.rightMouseDown(with: event)
             return
         }
+        isContextMenuTracking = true
+        defer { isContextMenuTracking = false }
         NSMenu.popUpContextMenu(menu, with: event, for: self)
     }
 
@@ -316,6 +362,22 @@ extension CAFolderGridView {
         copyPathItem.image = NSImage(systemSymbolName: "doc.on.doc", accessibilityDescription: nil)
         copyPathItem.target = self
         menu.addItem(copyPathItem)
+
+        if folderQuickLaunchPinningEnabled {
+            menu.addItem(NSMenuItem.separator())
+            let isPinned = isFolderQuickLaunchAppPinned?(app) ?? false
+            let pinItem = NSMenuItem(
+                title: isPinned ? unpinFromFolderQuickLaunchTopMenuTitle : pinToFolderQuickLaunchTopMenuTitle,
+                action: #selector(handleFolderQuickLaunchPinFromContextMenu(_:)),
+                keyEquivalent: ""
+            )
+            pinItem.image = NSImage(
+                systemSymbolName: isPinned ? "pin.slash" : "pin",
+                accessibilityDescription: nil
+            )
+            pinItem.target = self
+            menu.addItem(pinItem)
+        }
 
         menu.addItem(NSMenuItem.separator())
 
@@ -361,6 +423,13 @@ extension CAFolderGridView {
     @objc private func handleFolderHideAppFromContextMenu(_ sender: NSMenuItem) {
         guard let app = contextMenuTargetApp else { return }
         onHideApp?(app)
+        contextMenuTargetApp = nil
+    }
+
+    @objc private func handleFolderQuickLaunchPinFromContextMenu(_ sender: NSMenuItem) {
+        guard let app = contextMenuTargetApp else { return }
+        let isPinned = isFolderQuickLaunchAppPinned?(app) ?? false
+        onSetFolderQuickLaunchAppPinned?(app, !isPinned)
         contextMenuTargetApp = nil
     }
 

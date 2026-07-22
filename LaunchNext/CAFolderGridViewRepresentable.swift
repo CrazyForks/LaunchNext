@@ -52,7 +52,10 @@ struct CAFolderGridViewRepresentable: NSViewRepresentable {
         view.copyAppPathMenuTitle = appStore.localized(.contextMenuCopyAppPath)
         view.hideAppMenuTitle = appStore.localized(.hiddenAppsAddButton)
         view.uninstallWithToolMenuTitle = appStore.localized(.contextMenuUninstallWithConfiguredTool)
+        view.pinToFolderQuickLaunchTopMenuTitle = appStore.localized(.contextMenuPinToFolderQuickLaunchTop)
+        view.unpinFromFolderQuickLaunchTopMenuTitle = appStore.localized(.contextMenuUnpinFromFolderQuickLaunchTop)
         view.canUseConfiguredUninstallTool = appStore.uninstallToolAppURL != nil
+        view.folderQuickLaunchPinningEnabled = appStore.useCAGridRenderer && appStore.folderQuickLaunchEnabled
     }
 
     private func wireCallbacks(_ view: CAFolderGridView) {
@@ -114,6 +117,14 @@ struct CAFolderGridViewRepresentable: NSViewRepresentable {
         view.onHideApp = { app in
             DispatchQueue.main.async {
                 _ = appStore.hideApp(app)
+            }
+        }
+        view.isFolderQuickLaunchAppPinned = { app in
+            appStore.isFolderQuickLaunchAppPinned(app, inFolderID: folder.id)
+        }
+        view.onSetFolderQuickLaunchAppPinned = { app, pinned in
+            DispatchQueue.main.async {
+                _ = appStore.setFolderQuickLaunchAppPinned(pinned, app: app, inFolderID: folder.id)
             }
         }
         view.onUninstallWithTool = { app in

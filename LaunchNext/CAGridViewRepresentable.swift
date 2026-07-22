@@ -62,21 +62,34 @@ struct CAGridViewRepresentable: NSViewRepresentable {
         view.batchSelectAppsMenuTitle = appStore.localized(.contextMenuBatchSelectApps)
         view.finishBatchSelectionMenuTitle = appStore.localized(.contextMenuFinishBatchSelection)
         view.canUseConfiguredUninstallTool = appStore.uninstallToolAppURL != nil
+        view.folderQuickLaunchEnabled = appStore.folderQuickLaunchEnabled
+        view.folderQuickLaunchAppsSorter = { folder in
+            appStore.orderedFolderQuickLaunchApps(in: folder)
+        }
+        view.isFolderQuickLaunchAppPinned = { folder, app in
+            appStore.isFolderQuickLaunchAppPinned(app, inFolderID: folder.id)
+        }
         view.allowsBatchSelectionMode = appStore.searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         
         // Set current page BEFORE items to ensure correct initial position
         view.setInitialPage(appStore.currentPage)
         view.items = items
 
+        let launchApp: (AppInfo) -> Void = { app in
+            onOpenApp?(app)
+            AppDelegate.shared?.hideWindow()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                if !NSWorkspace.shared.open(app.url) {
+                    NSSound.beep()
+                }
+            }
+        }
+
         view.onItemClicked = { item, index in
             // 单击打开应用或文件夹
             switch item {
             case .app(let app):
-                onOpenApp?(app)
-                AppDelegate.shared?.hideWindow()
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                    NSWorkspace.shared.open(app.url)
-                }
+                launchApp(app)
             case .folder(let folder):
                 onOpenFolder?(folder)
             case .missingApp:
@@ -88,6 +101,7 @@ struct CAGridViewRepresentable: NSViewRepresentable {
                 break
             }
         }
+        view.onFolderQuickLaunchApp = launchApp
 
         view.onItemDoubleClicked = { item, index in
             // 双击也处理（兼容）
@@ -280,6 +294,13 @@ struct CAGridViewRepresentable: NSViewRepresentable {
         nsView.batchSelectAppsMenuTitle = appStore.localized(.contextMenuBatchSelectApps)
         nsView.finishBatchSelectionMenuTitle = appStore.localized(.contextMenuFinishBatchSelection)
         nsView.canUseConfiguredUninstallTool = appStore.uninstallToolAppURL != nil
+        nsView.folderQuickLaunchEnabled = appStore.folderQuickLaunchEnabled
+        nsView.folderQuickLaunchAppsSorter = { folder in
+            appStore.orderedFolderQuickLaunchApps(in: folder)
+        }
+        nsView.isFolderQuickLaunchAppPinned = { folder, app in
+            appStore.isFolderQuickLaunchAppPinned(app, inFolderID: folder.id)
+        }
         nsView.allowsBatchSelectionMode = appStore.searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
 
         // 检查刷新触发器是否变化（文件夹创建/修改会触发）

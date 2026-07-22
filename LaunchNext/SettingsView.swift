@@ -81,6 +81,7 @@ struct SettingsView: View {
     @State private var showCLIRemoveInfoPopover = false
     @State private var showCLIFullPathCommand = false
     @State private var showHideMenuBarInfoPopover = false
+    @State private var showFolderQuickLaunchInfoPopover = false
     @State private var copiedCLICommand: String? = nil
     @State private var cliCommandActionMessage: String? = nil
     @State private var layoutModePreviewScope: LayoutModePreviewScope = .fullscreen
@@ -4841,6 +4842,36 @@ private enum SettingsSection: String, CaseIterable, Identifiable {
                     .foregroundStyle(.secondary)
             }
 
+            Group {
+                HStack {
+                    Text(appStore.localized(.folderQuickLaunchTitle))
+                        .fixedSize(horizontal: false, vertical: true)
+                    Button {
+                        showFolderQuickLaunchInfoPopover.toggle()
+                    } label: {
+                        Image(systemName: "info.circle")
+                            .font(.caption.weight(.regular))
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .popover(isPresented: $showFolderQuickLaunchInfoPopover, arrowEdge: .top) {
+                        Text(appStore.localized(.folderQuickLaunchHint))
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .padding(12)
+                            .frame(width: 280, alignment: .leading)
+                    }
+                    Spacer()
+                    Toggle("", isOn: $appStore.folderQuickLaunchEnabled)
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                }
+
+            }
+            .disabled(!appStore.useCAGridRenderer)
+            .opacity(appStore.useCAGridRenderer ? 1 : 0.5)
+
             HStack {
                 Text(appStore.localized(.windowOpenAnimationTitle))
                 Spacer()
@@ -5583,6 +5614,7 @@ private enum SettingsSection: String, CaseIterable, Identifiable {
                     keys.insert("gridRowSpacing")
                     keys.insert("folderDropZoneScale")
                     keys.insert(AppStore.folderPreviewHighResKey)
+                    keys.insert(AppStore.folderQuickLaunchEnabledKey)
                     keys.insert(AppStore.folderLayoutModeKey)
                     keys.insert("pageIndicatorOffset")
                     keys.insert(AppStore.pageIndicatorTopPaddingKey)

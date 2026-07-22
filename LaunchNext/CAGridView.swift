@@ -106,6 +106,9 @@ final class CAGridView: NSView, CALayerDelegate, NSDraggingSource {
     var onShowAppInFinder: ((AppInfo) -> Void)?
     var onCopyAppPath: ((AppInfo) -> Void)?
     var onHideApp: ((AppInfo) -> Void)?
+    var onFolderQuickLaunchApp: ((AppInfo) -> Void)?
+    var folderQuickLaunchAppsSorter: ((FolderInfo) -> [AppInfo])?
+    var isFolderQuickLaunchAppPinned: ((FolderInfo, AppInfo) -> Bool)?
     var onRenameFolder: ((FolderInfo) -> Void)?
     var onDissolveFolder: ((FolderInfo) -> Void)?
     var onUninstallWithTool: ((AppInfo) -> Void)?
@@ -123,6 +126,8 @@ final class CAGridView: NSView, CALayerDelegate, NSDraggingSource {
     var batchSelectAppsMenuTitle: String = "Batch Select Apps"
     var finishBatchSelectionMenuTitle: String = "Finish Batch Selection"
     var canUseConfiguredUninstallTool: Bool = false
+    var folderQuickLaunchEnabled: Bool = false
+    var isContextMenuTracking: Bool = false
     var contextMenuTargetApp: AppInfo?
     var contextMenuTargetFolder: FolderInfo?
     var allowsBatchSelectionMode: Bool = true {
@@ -393,6 +398,7 @@ final class CAGridView: NSView, CALayerDelegate, NSDraggingSource {
 
         scrollEventMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
             guard let self = self else { return event }
+            guard !self.isContextMenuTracking else { return event }
             guard self.isScrollEnabled else { return event }
             guard let window = self.window else { return event }
             
