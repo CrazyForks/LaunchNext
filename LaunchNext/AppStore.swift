@@ -2185,10 +2185,25 @@ final class AppStore: ObservableObject {
     var modelContext: ModelContext?
 
     // MARK: - Auto rescan (FSEvents)
+    private enum ApplicationReconciliationReason: Hashable {
+        case initial
+        case fileSystemEvent
+        case externalUninstallerReturn
+        case staleWindowFallback
+        case manual
+        case sourceChange
+        case explicit
+    }
+
+    private static let applicationReconciliationFallbackInterval: TimeInterval = 15 * 60
+    private static let applicationReconciliationEventDebounce: TimeInterval = 1.0
+
     private var fsEventStream: FSEventStreamRef?
-    private var pendingChangedAppPaths: Set<String> = []
-    private var pendingForceFullScan: Bool = false
-    private let fullRescanThreshold: Int = 50
+    private var applicationReconciliationReasons: Set<ApplicationReconciliationReason> = []
+    private var applicationReconciliationInProgress = false
+    private var applicationReconciliationWorkItem: DispatchWorkItem?
+    private var lastSuccessfulApplicationReconciliationAt: Date?
+    private var needsReconciliationAfterExternalUninstall = false
 
     // 状态标记
     private var hasPerformedInitialScan: Bool = false
@@ -2196,10 +2211,8 @@ final class AppStore: ObservableObject {
     private var hasAppliedOrderFromStore: Bool = false
     
     // 后台刷新队列与节流
-    private let refreshQueue = DispatchQueue(label: "app.store.refresh", qos: .userInitiated)
     private var gridRefreshWorkItem: DispatchWorkItem?
     private var iconScaleWorkItem: DispatchWorkItem?
-    private var rescanWorkItem: DispatchWorkItem?
     private var customTitleRefreshWorkItem: DispatchWorkItem?
     private var searchQueryWorkItem: DispatchWorkItem?
     private let fsEventsQueue = DispatchQueue(label: "app.store.fsevents")
@@ -2226,7 +2239,9 @@ final class AppStore: ObservableObject {
             guard !standardized.isEmpty, !seen.contains(standardized) else { continue }
 
             var isDirectory: ObjCBool = false
-            if fileManager.fileExists(atPath: standardized, isDirectory: &isDirectory), isDirectory.boolValue {
+            if fileManager.fileExists(atPath: standardized, isDirectory: &isDirectory),
+               isDirectory.boolValue,
+               fileManager.isReadableFile(atPath: standardized) {
                 seen.insert(standardized)
                 result.append(standardized)
             }
@@ -2303,7 +2318,15 @@ final class AppStore: ObservableObject {
 
         let normalizedSource = normalizeApplicationPath(removableSource) ?? standardizedFilePath(removableSource)
         let customSources = customAppSourcePaths.map { normalizeApplicationPath($0) ?? standardizedFilePath($0) }
-        return customSources.contains(normalizedSource)
+        guard customSources.contains(normalizedSource) else { return false }
+
+        // A missing app is retained only while its configured source itself is
+        // unavailable (for example, an unmounted external volume). If the source
+        // is reachable, the missing bundle represents a real removal.
+        var isDirectory: ObjCBool = false
+        return !FileManager.default.fileExists(atPath: normalizedSource, isDirectory: &isDirectory)
+            || !isDirectory.boolValue
+            || !FileManager.default.isReadableFile(atPath: normalizedSource)
     }
 
     private func clearMissingPlaceholder(for path: String) {
@@ -2573,7 +2596,7 @@ final class AppStore: ObservableObject {
             guard customAppSourcePaths != oldValue else { return }
             UserDefaults.standard.set(customAppSourcePaths, forKey: AppStore.customAppSourcesKey)
             restartAutoRescan()
-            scanApplicationsWithOrderPreservation()
+            requestApplicationReconciliation(reason: .sourceChange)
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
                 self?.removeEmptyPages()
             }
@@ -3239,11 +3262,107 @@ final class AppStore: ObservableObject {
         
         // 然后进行扫描，但保持现有顺序
         hasPerformedInitialScan = true
-        scanApplicationsWithOrderPreservation()
-        
-        // 扫描完成后生成缓存
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
-            self?.generateCacheAfterScan()
+        requestApplicationReconciliation(reason: .initial)
+    }
+
+    /// Called only when the LaunchNext window is about to become visible.
+    /// There is no background timer: the 15-minute fallback is evaluated here.
+    func reconcileApplicationsOnWindowShow() {
+        guard hasPerformedInitialScan else { return }
+
+        if needsReconciliationAfterExternalUninstall {
+            requestApplicationReconciliation(reason: .externalUninstallerReturn)
+            return
+        }
+
+        guard !applicationReconciliationInProgress else { return }
+        guard let lastSuccessfulApplicationReconciliationAt else {
+            requestApplicationReconciliation(reason: .staleWindowFallback)
+            return
+        }
+        guard Date().timeIntervalSince(lastSuccessfulApplicationReconciliationAt)
+                >= Self.applicationReconciliationFallbackInterval else { return }
+        requestApplicationReconciliation(reason: .staleWindowFallback)
+    }
+
+    private func requestApplicationReconciliation(reason: ApplicationReconciliationReason,
+                                                  debounce: TimeInterval = 0) {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { [weak self] in
+                self?.requestApplicationReconciliation(reason: reason, debounce: debounce)
+            }
+            return
+        }
+
+        applicationReconciliationReasons.insert(reason)
+        guard !applicationReconciliationInProgress else { return }
+
+        applicationReconciliationWorkItem?.cancel()
+        applicationReconciliationWorkItem = nil
+
+        guard debounce > 0 else {
+            startPendingApplicationReconciliation()
+            return
+        }
+
+        schedulePendingApplicationReconciliation(after: debounce)
+    }
+
+    private func schedulePendingApplicationReconciliation(after delay: TimeInterval) {
+        applicationReconciliationWorkItem?.cancel()
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.applicationReconciliationWorkItem = nil
+            self.startPendingApplicationReconciliation()
+        }
+        applicationReconciliationWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
+    }
+
+    private func startPendingApplicationReconciliation() {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { [weak self] in
+                self?.startPendingApplicationReconciliation()
+            }
+            return
+        }
+        guard !applicationReconciliationInProgress,
+              !applicationReconciliationReasons.isEmpty else { return }
+
+        applicationReconciliationWorkItem?.cancel()
+        applicationReconciliationWorkItem = nil
+
+        let reasons = applicationReconciliationReasons
+        applicationReconciliationReasons.removeAll()
+        applicationReconciliationInProgress = true
+
+        if reasons.contains(.manual) {
+            cacheManager.clearAllCaches()
+        }
+
+        performApplicationReconciliation(reasons: reasons)
+    }
+
+    private func finishApplicationReconciliation(reasons: Set<ApplicationReconciliationReason>,
+                                                 succeeded: Bool) {
+        precondition(Thread.isMainThread)
+
+        if succeeded {
+            lastSuccessfulApplicationReconciliationAt = Date()
+            if reasons.contains(.externalUninstallerReturn) {
+                needsReconciliationAfterExternalUninstall = false
+            }
+        }
+        applicationReconciliationInProgress = false
+
+        if !applicationReconciliationReasons.isEmpty {
+            if applicationReconciliationReasons == [.fileSystemEvent] {
+                schedulePendingApplicationReconciliation(
+                    after: Self.applicationReconciliationEventDebounce
+                )
+            } else {
+                startPendingApplicationReconciliation()
+            }
         }
     }
 
@@ -3292,11 +3411,30 @@ final class AppStore: ObservableObject {
         }
     }
     
-    /// 智能扫描应用：保持现有排序，新增应用放到最后，缺失应用移除，自动页面内补位
+    /// Requests an order-preserving scan through the single-flight coordinator.
     func scanApplicationsWithOrderPreservation() {
+        requestApplicationReconciliation(reason: .explicit)
+    }
+
+    /// 智能扫描应用：保持现有排序，新增应用放到最后，缺失应用移除，自动页面内补位
+    private func performApplicationReconciliation(reasons: Set<ApplicationReconciliationReason>) {
+        let searchPaths = applicationSearchPaths
+        let previousApps = apps
+        let normalizedCustomSources = customAppSourcePaths.compactMap(normalizeApplicationPath)
+        let normalizedCustomSourceSet = Set(normalizedCustomSources)
+        let fileManager = FileManager.default
+        let unavailableCustomSources = normalizedCustomSources.filter { source in
+            var isDirectory: ObjCBool = false
+            return !fileManager.fileExists(atPath: source, isDirectory: &isDirectory)
+                || !isDirectory.boolValue
+                || !fileManager.isReadableFile(atPath: source)
+        }
+
         DispatchQueue.global(qos: .userInitiated).async {
             var found: [AppInfo] = []
             var seenPaths = Set<String>()
+            var scanFailed = false
+            var sourceBecameUnavailable = false
 
             // 使用并发队列加速扫描
             let scanQueue = DispatchQueue(label: "app.scan", attributes: .concurrent)
@@ -3304,41 +3442,75 @@ final class AppStore: ObservableObject {
             let lock = NSLock()
             
             // 扫描所有应用
-            for path in self.applicationSearchPaths {
+            for path in searchPaths {
                 group.enter()
                 scanQueue.async {
+                    defer { group.leave() }
                     let url = URL(fileURLWithPath: path)
-                    
-                    if let enumerator = FileManager.default.enumerator(
+                    var localScanFailed = false
+                    var localFound: [AppInfo] = []
+                    var localSeenPaths = Set<String>()
+
+                    guard let enumerator = FileManager.default.enumerator(
                         at: url,
                         includingPropertiesForKeys: [.isDirectoryKey],
-                        options: [.skipsHiddenFiles, .skipsPackageDescendants]
-                    ) {
-                        var localFound: [AppInfo] = []
-                        var localSeenPaths = Set<String>()
-                        
-                        for case let item as URL in enumerator {
-                            let resolved = item.resolvingSymlinksInPath()
-                            guard resolved.pathExtension == "app",
-                                  self.isValidApp(at: resolved),
-                                  !self.isInsideAnotherApp(resolved) else { continue }
-                            if !localSeenPaths.contains(resolved.path) {
-                                localSeenPaths.insert(resolved.path)
-                                localFound.append(self.appInfo(from: resolved))
-                            }
+                        options: [.skipsHiddenFiles, .skipsPackageDescendants],
+                        errorHandler: { _, _ in
+                            localScanFailed = true
+                            return false
                         }
-                        
-                        // 线程安全地合并结果
-                        lock.lock()
-                        found.append(contentsOf: localFound)
-                        seenPaths.formUnion(localSeenPaths)
-                        lock.unlock()
+                    ) else {
+                        lock.withLock {
+                            scanFailed = true
+                        }
+                        return
                     }
-                    group.leave()
+
+                    for case let item as URL in enumerator {
+                        let resolved = item.resolvingSymlinksInPath()
+                        guard resolved.pathExtension == "app",
+                              self.isValidApp(at: resolved),
+                              !self.isInsideAnotherApp(resolved) else { continue }
+                        if !localSeenPaths.contains(resolved.path) {
+                            localSeenPaths.insert(resolved.path)
+                            localFound.append(self.appInfo(from: resolved))
+                        }
+                    }
+
+                    var isDirectory: ObjCBool = false
+                    let sourceStillAvailable = FileManager.default.fileExists(
+                        atPath: path,
+                        isDirectory: &isDirectory
+                    ) && isDirectory.boolValue && FileManager.default.isReadableFile(atPath: path)
+
+                    lock.withLock {
+                        if localScanFailed || !sourceStillAvailable {
+                            scanFailed = true
+                            if !sourceStillAvailable && normalizedCustomSourceSet.contains(path) {
+                                sourceBecameUnavailable = true
+                            }
+                        } else {
+                            // Only complete source results are allowed into the
+                            // aggregate. Partial enumeration must never authorize
+                            // removals from the persisted layout.
+                            found.append(contentsOf: localFound)
+                            seenPaths.formUnion(localSeenPaths)
+                        }
+                    }
                 }
             }
             
             group.wait()
+
+            guard !scanFailed else {
+                DispatchQueue.main.async {
+                    self.finishApplicationReconciliation(reasons: reasons, succeeded: false)
+                    if sourceBecameUnavailable {
+                        self.requestApplicationReconciliation(reason: .sourceChange)
+                    }
+                }
+                return
+            }
             
             // 去重和排序 - 使用更安全的方法
             var uniqueApps: [AppInfo] = []
@@ -3356,7 +3528,7 @@ final class AppStore: ObservableObject {
             var existingAppPaths = Set<String>()
             let refreshedMap = Dictionary(uniqueKeysWithValues: uniqueApps.map { ($0.url.path, $0) })
 
-            for app in self.apps {
+            for app in previousApps {
                 guard let refreshed = refreshedMap[app.url.path] else { continue }
                 newApps.append(refreshed)
                 existingAppPaths.insert(app.url.path)
@@ -3367,27 +3539,51 @@ final class AppStore: ObservableObject {
             newApps.append(contentsOf: sortedNewApps)
             
             DispatchQueue.main.async {
-                self.processScannedApplications(newApps)
-                
-                // 扫描完成后生成缓存
-                self.generateCacheAfterScan()
+                let didApplyChanges = self.processScannedApplications(
+                    newApps,
+                    unavailableCustomSources: unavailableCustomSources,
+                    reasons: reasons
+                )
+                if didApplyChanges {
+                    self.generateCacheAfterScan()
+                }
+                self.finishApplicationReconciliation(reasons: reasons, succeeded: true)
             }
         }
     }
     
     /// 手动触发完全重新扫描（用于设置中的手动刷新）
     func forceFullRescan() {
-        // 清除缓存
-        cacheManager.clearAllCaches()
-        
-        hasPerformedInitialScan = false
-        scanApplicationsWithOrderPreservation()
+        hasPerformedInitialScan = true
+        requestApplicationReconciliation(reason: .manual)
     }
     
     /// 处理扫描到的应用，智能匹配现有排序
-    private func processScannedApplications(_ newApps: [AppInfo]) {
+    @discardableResult
+    private func processScannedApplications(
+        _ newApps: [AppInfo],
+        unavailableCustomSources: [String],
+        reasons: Set<ApplicationReconciliationReason>
+    ) -> Bool {
         // 保存当前 items 的顺序和结构
         let currentItems = self.items
+
+        func isUnderUnavailableCustomSource(_ rawPath: String) -> Bool {
+            let path = standardizedFilePath(rawPath)
+            return unavailableCustomSources.contains { source in
+                path == source || path.hasPrefix(source.hasSuffix("/") ? source : source + "/")
+            }
+        }
+
+        func inventoryPaths(apps: [AppInfo], folders: [FolderInfo]) -> Set<String> {
+            var paths = Set(apps.map { standardizedFilePath($0.url.path) })
+            for folder in folders {
+                paths.formUnion(folder.apps.map { standardizedFilePath($0.url.path) })
+            }
+            return paths
+        }
+
+        let previousInventoryPaths = inventoryPaths(apps: apps, folders: folders)
         
         // 创建新应用列表，但保持现有顺序
         var updatedApps: [AppInfo] = []
@@ -3399,13 +3595,23 @@ final class AppStore: ObservableObject {
 
         // 第一步：保持现有顺序，同时用最新扫描结果刷新应用信息
         for app in self.apps {
-            updatedApps.append(freshMap[app.url.path] ?? app)
+            if let refreshed = freshMap[app.url.path] {
+                updatedApps.append(refreshed)
+            } else if isUnderUnavailableCustomSource(app.url.path) {
+                updatedApps.append(app)
+            }
         }
 
         // 同步更新文件夹中的应用对象，确保名称/图标及时刷新
-        for folderIndex in folders.indices {
-            let refreshedApps = folders[folderIndex].apps.map { freshMap[$0.url.path] ?? $0 }
-            folders[folderIndex].apps = refreshedApps
+        let reconciledFolders = folders.map { folder -> FolderInfo in
+            var updatedFolder = folder
+            updatedFolder.apps = folder.apps.compactMap { app in
+                if let refreshed = freshMap[app.url.path] {
+                    return refreshed
+                }
+                return isUnderUnavailableCustomSource(app.url.path) ? app : nil
+            }
+            return folderWithValidQuickLaunchPins(updatedFolder)
         }
         
         // 第二步：找出新增的应用（顺序保持与扫描结果一致）
@@ -3417,9 +3623,23 @@ final class AppStore: ObservableObject {
         // 第三步：将新增应用添加到末尾，保持现有应用顺序不变
         updatedApps.append(contentsOf: newAppsToAdd)
 
+        let nextInventoryPaths = inventoryPaths(apps: updatedApps, folders: reconciledFolders)
+        let inventoryChanged = previousInventoryPaths != nextInventoryPaths
+        let requiresMetadataRefresh = !reasons.isDisjoint(with: [
+            .initial,
+            .fileSystemEvent,
+            .manual,
+            .sourceChange,
+            .explicit
+        ])
+        guard inventoryChanged || requiresMetadataRefresh else {
+            return false
+        }
+
         // 更新应用列表
         self.apps = updatedApps
         pruneHiddenAppsFromAppList()
+        self.folders = sanitizedFolders(reconciledFolders)
         
         // 第四步：智能重建项目列表，保持用户排序
         self.smartRebuildItemsWithOrderPreservation(currentItems: currentItems, newApps: newAppsToAdd)
@@ -3436,6 +3656,7 @@ final class AppStore: ObservableObject {
         // 触发界面更新
         self.triggerFolderUpdate()
         self.triggerGridRefresh()
+        return true
     }
     
     /// 严格保持现有顺序的重建方法
@@ -3879,6 +4100,7 @@ final class AppStore: ObservableObject {
 
     deinit {
         autoCheckTimer?.cancel()
+        applicationReconciliationWorkItem?.cancel()
         stopAutoRescan()
         let center = NSWorkspace.shared.notificationCenter
         volumeObservers.forEach { center.removeObserver($0) }
@@ -4019,158 +4241,40 @@ final class AppStore: ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
             guard let self else { return }
             self.restartAutoRescan()
-            self.scanApplicationsWithOrderPreservation()
+            self.requestApplicationReconciliation(reason: .sourceChange)
         }
     }
 
     private func handleFSEvents(paths: [String], flagsPointer: UnsafePointer<FSEventStreamEventFlags>?, count: Int) {
         let maxCount = min(paths.count, count)
-        var localForceFull = false
+        var shouldReconcile = false
         
         for i in 0..<maxCount {
-            let rawPath = paths[i]
             let flags = flagsPointer?[i] ?? 0
 
             let created = (flags & FSEventStreamEventFlags(kFSEventStreamEventFlagItemCreated)) != 0
             let removed = (flags & FSEventStreamEventFlags(kFSEventStreamEventFlagItemRemoved)) != 0
             let renamed = (flags & FSEventStreamEventFlags(kFSEventStreamEventFlagItemRenamed)) != 0
             let modified = (flags & FSEventStreamEventFlags(kFSEventStreamEventFlagItemModified)) != 0
-            let isDir = (flags & FSEventStreamEventFlags(kFSEventStreamEventFlagItemIsDir)) != 0
+            let mustRescan = (flags & FSEventStreamEventFlags(kFSEventStreamEventFlagMustScanSubDirs)) != 0
+                || (flags & FSEventStreamEventFlags(kFSEventStreamEventFlagUserDropped)) != 0
+                || (flags & FSEventStreamEventFlags(kFSEventStreamEventFlagKernelDropped)) != 0
+                || (flags & FSEventStreamEventFlags(kFSEventStreamEventFlagEventIdsWrapped)) != 0
+                || (flags & FSEventStreamEventFlags(kFSEventStreamEventFlagRootChanged)) != 0
 
-            if isDir && (created || removed || renamed), applicationSearchPaths.contains(where: { rawPath.hasPrefix($0) }) {
-                localForceFull = true
+            if created || removed || renamed || modified || mustRescan {
+                shouldReconcile = true
                 break
             }
-
-            guard let appBundlePath = self.canonicalAppBundlePath(for: rawPath) else { continue }
-            if created || removed || renamed || modified {
-                pendingChangedAppPaths.insert(appBundlePath)
-            }
         }
 
-        if localForceFull { pendingForceFullScan = true }
-        scheduleRescan()
-    }
-
-    private func scheduleRescan() {
-        // 轻微防抖，避免频繁FSEvents触发造成主线程压力
-        rescanWorkItem?.cancel()
-        let work = DispatchWorkItem { [weak self] in self?.performImmediateRefresh() }
-        rescanWorkItem = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2, execute: work)
-    }
-
-    private func performImmediateRefresh() {
-        if pendingForceFullScan || pendingChangedAppPaths.count > fullRescanThreshold {
-            pendingForceFullScan = false
-            pendingChangedAppPaths.removeAll()
-            scanApplications()
-            return
+        guard shouldReconcile else { return }
+        DispatchQueue.main.async { [weak self] in
+            self?.requestApplicationReconciliation(
+                reason: .fileSystemEvent,
+                debounce: Self.applicationReconciliationEventDebounce
+            )
         }
-        
-        let changed = pendingChangedAppPaths
-        pendingChangedAppPaths.removeAll()
-        
-        if !changed.isEmpty {
-            applyIncrementalChanges(for: changed)
-        }
-    }
-
-
-    private func applyIncrementalChanges(for changedPaths: Set<String>) {
-        guard !changedPaths.isEmpty else { return }
-        
-        // 将磁盘与图标解析放到后台，主线程仅应用结果，减少卡顿
-        let snapshotApps = self.apps
-        refreshQueue.async { [weak self] in
-            guard let self else { return }
-            
-            enum PendingChange {
-                case insert(AppInfo)
-                case update(AppInfo)
-                case remove(String) // path
-            }
-            var changes: [PendingChange] = []
-            var pathToIndex: [String: Int] = [:]
-            for (idx, app) in snapshotApps.enumerated() { pathToIndex[app.url.path] = idx }
-            
-            for path in changedPaths {
-                let url = URL(fileURLWithPath: path).resolvingSymlinksInPath()
-                let exists = FileManager.default.fileExists(atPath: url.path)
-                let valid = exists && self.isValidApp(at: url) && !self.isInsideAnotherApp(url)
-                if valid {
-                    let info = self.appInfo(from: url)
-                    if pathToIndex[url.path] != nil {
-                        changes.append(.update(info))
-                    } else {
-                        changes.append(.insert(info))
-                    }
-                } else {
-                    changes.append(.remove(url.path))
-                }
-            }
-            
-            DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
-                
-                // 应用删除事件：保留现有图标，等待卷重新挂载
-                
-                // 应用更新
-                let updates: [AppInfo] = changes.compactMap { if case .update(let info) = $0 { return info } else { return nil } }
-                if !updates.isEmpty {
-                    var map: [String: Int] = [:]
-                    for (idx, app) in self.apps.enumerated() { map[app.url.path] = idx }
-                    for info in updates {
-                        let standardizedInfoPath = self.standardizedFilePath(info.url.path)
-                        if let idx = map[info.url.path], self.apps.indices.contains(idx) { self.apps[idx] = info }
-                        for fIdx in self.folders.indices {
-                            for aIdx in self.folders[fIdx].apps.indices where self.folders[fIdx].apps[aIdx].url.path == info.url.path {
-                                self.folders[fIdx].apps[aIdx] = info
-                            }
-                        }
-                        for iIdx in self.items.indices {
-                            switch self.items[iIdx] {
-                            case .app(let a):
-                                if self.standardizedFilePath(a.url.path) == standardizedInfoPath {
-                                    self.items[iIdx] = .app(info)
-                                    self.clearMissingPlaceholder(for: standardizedInfoPath)
-                                }
-                            case .missingApp(let placeholder):
-                                if self.standardizedFilePath(placeholder.bundlePath) == standardizedInfoPath {
-                                    self.items[iIdx] = .app(info)
-                                    self.clearMissingPlaceholder(for: standardizedInfoPath)
-                                }
-                            default:
-                                break
-                            }
-                        }
-                    }
-                    self.rebuildItems()
-                }
-                
-                // 新增应用
-                let inserts: [AppInfo] = changes.compactMap { if case .insert(let info) = $0 { return info } else { return nil } }
-                if !inserts.isEmpty {
-                    self.apps.append(contentsOf: inserts)
-                    self.apps.sort { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
-                    self.rebuildItems()
-                }
-                
-                // 刷新与持久化
-                self.triggerFolderUpdate()
-                self.triggerGridRefresh()
-                self.refreshMissingPlaceholders()
-                self.saveAllOrder()
-                self.updateCacheAfterChanges()
-            }
-        }
-    }
-
-    private func canonicalAppBundlePath(for rawPath: String) -> String? {
-        guard let range = rawPath.range(of: ".app") else { return nil }
-        let end = rawPath.index(range.lowerBound, offsetBy: 4)
-        let bundlePath = String(rawPath[..<end])
-        return bundlePath
     }
 
     private func isInsideAnotherApp(_ url: URL) -> Bool {
@@ -5603,9 +5707,6 @@ final class AppStore: ObservableObject {
     /// 手动刷新（模拟全新启动的完整流程）
     func refresh() {
         print("LaunchNext: Manual refresh triggered")
-        
-        // 清除缓存，确保图标与搜索索引重新生成
-        cacheManager.clearAllCaches()
 
         // 重置界面与状态，使之接近"首次启动"
         openFolder = nil
@@ -5615,14 +5716,8 @@ final class AppStore: ObservableObject {
         // 不要重置 hasAppliedOrderFromStore，保持布局数据
         hasPerformedInitialScan = true
 
-        // 执行与首次启动相同的扫描路径（保持现有顺序，新增在末尾）
-        scanApplicationsWithOrderPreservation()
-
-        // 扫描完成后生成缓存
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
-            guard let self else { return }
-            self.generateCacheAfterScan()
-        }
+        // 清缓存和扫描都通过统一协调器执行，避免与自动扫描重叠。
+        requestApplicationReconciliation(reason: .manual)
 
         // 强制界面刷新
         triggerFolderUpdate()
@@ -6014,6 +6109,7 @@ final class AppStore: ObservableObject {
         let target = app.url.resolvingSymlinksInPath()
         guard FileManager.default.fileExists(atPath: target.path) else { return false }
         let configuration = NSWorkspace.OpenConfiguration()
+        needsReconciliationAfterExternalUninstall = true
         NSWorkspace.shared.open([target], withApplicationAt: helper, configuration: configuration) { _, _ in }
         return true
     }

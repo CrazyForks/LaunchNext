@@ -1627,6 +1627,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSGestureR
         lastShowAt = Date()
         windowIsVisible = true
         updateSystemUIVisibility()
+        appStore.reconcileApplicationsOnWindowShow()
         SoundManager.shared.play(.launchpadOpen)
         NotificationCenter.default.post(name: .launchpadWindowShown, object: nil)
 
