@@ -2535,30 +2535,35 @@ private enum SettingsSection: String, CaseIterable, Identifiable {
 
             HStack(spacing: 12) {
                 glassButton(title: appStore.localized(.aboutProjectLink), systemImage: "arrow.up.right.square") {
-                    if let url = URL(string: "https://github.com/RoversX/LaunchNext") {
-                        NSWorkspace.shared.open(url)
-                    }
+                    openExternalLink("https://github.com/RoversX/LaunchNext")
                 }
                 glassButton(title: appStore.localized(.aboutReportBug), systemImage: "exclamationmark.bubble") {
-                    if let url = URL(string: "https://github.com/RoversX/LaunchNext/issues") {
-                        NSWorkspace.shared.open(url)
-                    }
+                    openExternalLink("https://github.com/RoversX/LaunchNext/issues")
                 }
                 glassButton(title: appStore.localized(.aboutContribute), systemImage: "hands.sparkles") {
-                    if let url = URL(string: "https://github.com/RoversX/LaunchNext") {
-                        NSWorkspace.shared.open(url)
-                    }
+                    openExternalLink("https://github.com/RoversX/LaunchNext")
                 }
                 glassButton(title: appStore.localized(.aboutBlog), systemImage: "globe") {
-                    if let url = URL(string: "https://blog.closex.org") {
-                        NSWorkspace.shared.open(url)
-                    }
+                    openExternalLink("https://blog.closex.org")
                 }
             }
             .frame(maxWidth: .infinity)
         }
         .frame(maxWidth: .infinity, minHeight: 550, alignment: .top)
         .frame(maxHeight: .infinity, alignment: .top)
+    }
+
+    private func openExternalLink(_ rawURL: String) {
+        guard let url = URL(string: rawURL) else {
+            NSSound.beep()
+            return
+        }
+
+        if let appDelegate = AppDelegate.shared {
+            appDelegate.openExternalURL(url)
+        } else if !NSWorkspace.shared.open(url) {
+            NSSound.beep()
+        }
     }
 
     @ViewBuilder

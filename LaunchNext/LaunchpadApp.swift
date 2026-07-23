@@ -1508,6 +1508,19 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSGestureR
         startPendingWindowTransition()
     }
 
+    func openExternalURL(_ url: URL) {
+        // LaunchNext uses a floating window, so opening a URL alone can leave the
+        // settings sheet covering the browser. Follow the same handoff policy as
+        // launching an app: dismiss LaunchNext, then let the target app activate.
+        appStore.isSetting = false
+        hideWindow()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            if !NSWorkspace.shared.open(url) {
+                NSSound.beep()
+            }
+        }
+    }
+
     func beginExternalSystemDragSession() {
         isPerformingExternalSystemDrag = true
     }
