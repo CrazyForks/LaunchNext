@@ -489,6 +489,14 @@ struct LaunchpadView: View {
         return backgroundImageController.content?.image
     }
 
+    private func handleHeaderBackgroundTap() {
+        guard appStore.openFolder == nil,
+              !appStore.isSetting,
+              !appStore.isFolderNameEditing,
+              draggingItem == nil else { return }
+        AppDelegate.shared?.hideWindow()
+    }
+
     private func launchpadMainContent(in geo: GeometryProxy) -> some View {
         let actualTopPadding = config.isFullscreen ? geo.size.height * config.topPadding : 0
         let actualBottomPadding = config.isFullscreen ? geo.size.height * config.bottomPadding : 0
@@ -501,6 +509,10 @@ struct LaunchpadView: View {
             if config.isFullscreen {
                 Spacer()
                     .frame(height: actualTopPadding)
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        handleHeaderBackgroundTap()
+                    }
             }
             ZStack {
                 HStack(spacing: 8) {
@@ -561,17 +573,28 @@ struct LaunchpadView: View {
             .padding(.top)
             .padding(.horizontal)
             .background(
-                GeometryReader { proxy in
-                    // 记录顶部区域的总高度（包含顶部动态 padding + 此区域本身 + 额外余量）
-                    Color.clear.onAppear {
-                        let extra: CGFloat = 24
-                        let total = (config.isFullscreen ? geo.size.height * config.topPadding : 0) + proxy.size.height + extra
-                        DispatchQueue.main.async { headerTotalHeight = total }
-                    }
-                    .onChange(of: proxy.size) { _ in
-                        let extra: CGFloat = 24
-                        let total = (config.isFullscreen ? geo.size.height * config.topPadding : 0) + proxy.size.height + extra
-                        DispatchQueue.main.async { headerTotalHeight = total }
+                ZStack {
+                    // Search and toolbar controls remain above this catcher, so
+                    // only otherwise-empty header space closes LaunchNext.
+                    Color.clear
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            handleHeaderBackgroundTap()
+                        }
+
+                    GeometryReader { proxy in
+                        // Track the total header height, including dynamic top padding and extra spacing.
+                        Color.clear.onAppear {
+                            let extra: CGFloat = 24
+                            let total = (config.isFullscreen ? geo.size.height * config.topPadding : 0) + proxy.size.height + extra
+                            DispatchQueue.main.async { headerTotalHeight = total }
+                        }
+                        .onChange(of: proxy.size) { _ in
+                            let extra: CGFloat = 24
+                            let total = (config.isFullscreen ? geo.size.height * config.topPadding : 0) + proxy.size.height + extra
+                            DispatchQueue.main.async { headerTotalHeight = total }
+                        }
+                        .allowsHitTesting(false)
                     }
                 }
             )
@@ -731,7 +754,7 @@ struct LaunchpadView: View {
                 }
             }
 
-            // 点击关闭：顶部区域（含搜索）不关闭；窗口四周边距点击关闭
+            // The header passes events through; clicking the outer window margins dismisses LaunchNext.
             GeometryReader { proxy in
                 let w = proxy.size.width
                 let h = proxy.size.height
@@ -739,7 +762,7 @@ struct LaunchpadView: View {
                 let bottomPad = max(config.isFullscreen ? h * config.bottomPadding : 0, 24)
                 let sidePad = max(config.isFullscreen ? w * config.horizontalPadding : 0, 24)
 
-                // 顶部安全区：透传
+                // Header area: pass through.
                 VStack(spacing: 0) {
                     Rectangle().fill(Color.clear)
                         .frame(height: topSafe)
