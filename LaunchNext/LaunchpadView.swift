@@ -109,6 +109,7 @@ private extension View {
 
 struct LaunchpadView: View {
     @ObservedObject var appStore: AppStore
+    @ObservedObject private var searchEngine: LaunchpadSearchEngine
     @StateObject private var backgroundImageController = BackgroundImageController()
     @Environment(\.colorScheme) private var colorScheme
     @State private var keyMonitor: Any?
@@ -138,7 +139,6 @@ struct LaunchpadView: View {
     private static var geometryCache: [String: CGPoint] = [:]
     private static var lastGeometryUpdate: Date = Date.distantPast
     private let geometryCacheTimeout: TimeInterval = 0.1 // 100ms缓存超时
-    private let searchEngine = LaunchpadSearchEngine()
     
     // 性能监控
     @State private var performanceMetrics: [String: TimeInterval] = [:]
@@ -168,6 +168,11 @@ struct LaunchpadView: View {
     @State private var postOnboardingGridOpacity: Double = 1
     @State private var postOnboardingGridScale: CGFloat = 1
     @State private var pendingPostOnboardingReveal: Bool = false
+
+    init(appStore: AppStore) {
+        _appStore = ObservedObject(wrappedValue: appStore)
+        _searchEngine = ObservedObject(wrappedValue: appStore.searchEngine)
+    }
 
     private var isFolderOpen: Bool { appStore.openFolder != nil }
     private var currentScreenID: String? {

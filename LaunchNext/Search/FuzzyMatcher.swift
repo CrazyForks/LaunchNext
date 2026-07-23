@@ -1,10 +1,34 @@
 import Foundation
 
+struct SearchMatch {
+    enum Source: Int {
+        case transliteration
+        case original
+    }
+
+    let source: Source
+    let score: Int
+}
+
 struct FuzzyMatcher {
-    func score(query: String, entry: SearchIndexEntry) -> Int? {
+    func score(query: String, entry: SearchIndexEntry) -> SearchMatch? {
         let normalizedQuery = SearchIndexEntry.normalize(query)
         guard !normalizedQuery.isEmpty else { return nil }
 
+        if let originalScore = originalScore(query: normalizedQuery, entry: entry) {
+            return SearchMatch(source: .original, score: originalScore)
+        }
+
+        guard normalizedQuery.unicodeScalars.allSatisfy({
+            $0.isASCII && CharacterSet.alphanumerics.contains($0)
+        }), let transliterationScore = transliterationScore(query: normalizedQuery, entry: entry) else {
+            return nil
+        }
+
+        return SearchMatch(source: .transliteration, score: transliterationScore)
+    }
+
+    private func originalScore(query normalizedQuery: String, entry: SearchIndexEntry) -> Int? {
         if entry.normalizedName == normalizedQuery {
             return 1_000
         }
@@ -27,6 +51,38 @@ struct FuzzyMatcher {
 
         if entry.normalizedName.contains(normalizedQuery) {
             return 180
+        }
+
+        return nil
+    }
+
+    private func transliterationScore(query normalizedQuery: String,
+                                      entry: SearchIndexEntry) -> Int? {
+        guard let transliteratedName = entry.transliteratedName else { return nil }
+
+        if transliteratedName == normalizedQuery {
+            return 1_000
+        }
+
+        if transliteratedName.hasPrefix(normalizedQuery) {
+            return 700 - min(80, max(0, transliteratedName.count - normalizedQuery.count))
+        }
+
+        if let tokenIndex = entry.transliteratedTokens.firstIndex(where: { $0.hasPrefix(normalizedQuery) }) {
+            return 520 - min(tokenIndex * 15, 120)
+        }
+
+        if !entry.transliterationInitials.isEmpty,
+           entry.transliterationInitials == normalizedQuery {
+            return 500
+        }
+
+        if !entry.transliterationInitials.isEmpty,
+           entry.transliterationInitials.hasPrefix(normalizedQuery) {
+            return 470 - min(
+                max(0, entry.transliterationInitials.count - normalizedQuery.count) * 10,
+                80
+            )
         }
 
         return nil

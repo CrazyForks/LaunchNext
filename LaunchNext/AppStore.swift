@@ -659,7 +659,12 @@ final class AppStore: ObservableObject {
     }
     @Published var apps: [AppInfo] = []
     @Published var folders: [FolderInfo] = []
-    @Published var items: [LaunchpadItem] = []
+    let searchEngine = LaunchpadSearchEngine()
+    @Published var items: [LaunchpadItem] = [] {
+        didSet {
+            searchEngine.updateIndex(for: items)
+        }
+    }
     @Published private(set) var missingPlaceholders: [String: MissingAppPlaceholder] = [:]
     @Published private(set) var hiddenAppPaths: Set<String> = AppStore.loadHiddenApps()
 
